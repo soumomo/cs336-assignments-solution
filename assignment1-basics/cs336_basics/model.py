@@ -263,7 +263,7 @@ class Multi_Head_Attention(nn.Module):
         out =  self.attention(Q , K , V , mask) #(... , num_heads , seq_len , d_k)
         out = out.transpose(-3,-2)
         out = out.reshape(*out.shape[:-2] , -1)
-        return self.output_proj(out)
+        return self.output_proj(out) 
 
 class TransformerBlock(nn.Module):
     '''
