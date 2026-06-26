@@ -5,7 +5,7 @@ my implementations for stanford cs336 (language modeling from scratch).
 ## assignment 1: basics
 
 ### Dataset Used
-- [TinyStories Dataset](https://huggingface.co/datasets/roneneldan/TinyStories/tree/main)
+- [TinyStories Dataset](https://huggingface.co/datasets/roneneldan/TinyStories/tree/main) 🤗
 
 ### progress
 - [x] phase 1: bpe tokenizer training 
