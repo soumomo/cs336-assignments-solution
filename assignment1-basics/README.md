@@ -1,50 +1,20 @@
-# CS336 Spring 2025 Assignment 1: Basics
+# cs336 assignments
 
-For a full description of the assignment, see the assignment handout at
-[cs336_assignment1_basics.pdf](./cs336_assignment1_basics.pdf)
+my implementations for stanford cs336 (language modeling from scratch).
 
-If you see any issues with the assignment handout or code, please feel free to
-raise a GitHub issue or open a pull request with a fix.
+## assignment 1: basics
 
-## Setup
+### Dataset Used
+- [TinyStories Dataset](https://huggingface.co/datasets/roneneldan/TinyStories/tree/main)
 
-### Environment
-We manage our environments with `uv` to ensure reproducibility, portability, and ease of use.
-Install `uv` [here](https://github.com/astral-sh/uv#installation) (recommended), or run `pip install uv`/`brew install uv`.
-We recommend reading a bit about managing projects in `uv` [here](https://docs.astral.sh/uv/guides/projects/#managing-dependencies) (you will not regret it!).
+### progress
+- [x] phase 1: bpe tokenizer training 
+- [x] phase 2: tokenizer encode and decode
+- [x] phase 3: model components (rmsnorm, swiglu, rope, multi-head attention, transformer block, transformerlm)
+- [x] phase 4: training utilities (cross-entropy, gradient clipping, cosine lr schedule, custom adamw optimizer)
+- [x] phase 5: data loading & checkpointing (batching, save/load checkpoints)
+- [x] training loop (implemented and integrated)
 
-You can now run any code in the repo using
-```sh
-uv run <python_file_path>
-```
-and the environment will be automatically solved and activated when necessary.
-
-### Run unit tests
-
-
-```sh
-uv run pytest
-```
-
-Initially, all tests should fail with `NotImplementedError`s.
-To connect your implementation to the tests, complete the
-functions in [./tests/adapters.py](./tests/adapters.py).
-
-### Download data
-Download the TinyStories data and a subsample of OpenWebText
-
-``` sh
-mkdir -p data
-cd data
-
-wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt
-wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-valid.txt
-
-wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_train.txt.gz
-gunzip owt_train.txt.gz
-wget https://huggingface.co/datasets/stanford-cs336/owt-sample/resolve/main/owt_valid.txt.gz
-gunzip owt_valid.txt.gz
-
-cd ..
-```
-
+### tasks left
+- [ ] phase 6: text generation (sampling & temperature)
+- [ ] phase 7: scaling law experiments (only the final evaluation/experiments phase remains!)
