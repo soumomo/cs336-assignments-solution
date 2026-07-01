@@ -221,7 +221,7 @@ def run_rope(
         d_k (int): Embedding dimension size for the query or key tensor.
         theta (float): RoPE parameter.
         max_seq_len (int): Maximum sequence length to pre-cache if your implementation does that.
-        in_query_or_key (Float[Tensor, "... sequence_length d_k"]): Input tensor to run RoPE on.
+        in_query_or_key (Float[Tensor, "... sequence_length d_k"]): Input tensor to run RoPE on.n
         token_positions (Int[Tensor, "... sequence_length"]): Tensor of shape (batch_size, sequence_length) with the token positions
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.

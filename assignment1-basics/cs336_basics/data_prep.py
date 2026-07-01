@@ -53,6 +53,9 @@ if __name__ == "__main__":
     all_tokens = []
     with open("data/TinyStoriesV2-GPT4-valid.txt", "r", encoding="utf-8") as file:
         for idx, line in enumerate(file):
+            if idx >= 1000:
+                break
+            
             if idx % 50000 == 0 and idx > 0:
                 print(f"Processed {idx} lines...")
 

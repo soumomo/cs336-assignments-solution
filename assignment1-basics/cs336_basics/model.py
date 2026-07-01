@@ -1,69 +1,8 @@
-"""
-CS336 Assignment 1 — Transformer Model Components
-
-All components are torch.nn.Module subclasses (except softmax).
-DO NOT use torch.nn.Linear, torch.nn.Embedding, or torch.nn.functional.
-Only allowed: nn.Parameter, nn.Module, nn.ModuleList, torch.sigmoid.
-
-Build in this order (each depends on the ones above):
-
-1. Linear (1 pt)
-   - y = Wx (no bias)
-   - Init: truncated normal, variance = 2 / (d_in + d_out)
-   - Test: pytest -k test_linear
-
-2. Embedding (1 pt)
-   - Lookup into (vocab_size, d_model) weight matrix
-   - Init: truncated normal, variance = 1
-   - Test: pytest -k test_embedding
-
-3. RMSNorm (1 pt)
-   - Root Mean Square Layer Normalization with learnable gain
-   - Upcast to float32 for stability, then downcast back
-   - Test: pytest -k test_rmsnorm
-
-4. SwiGLU Feed-Forward Network (2 pts)
-   - FFN(x) = W2(SiLU(W1 * x) ⊙ W3 * x)
-   - Three Linear layers (no bias), d_ff ≈ (8/3) * d_model rounded to multiple of 64
-   - Test: pytest -k test_swiglu
-
-5. Softmax (1 pt)
-   - Numerically stable: subtract max before exp
-   - Standalone function, not a Module
-   - Test: pytest -k test_softmax
-
-6. RoPE — Rotary Position Embeddings (2 pts)
-   - Apply pairwise rotations to Q/K vectors based on position
-   - Pre-compute sin/cos with register_buffer in __init__
-   - Must handle arbitrary batch dimensions
-   - Test: pytest -k test_rope
-
-7. Scaled Dot-Producat Attention (5 pts)
-   - attention(Q, K, V) = softmax(QK^T / sqrt(d_k)) V
-   - Support optional boolean mask
-   - Handle arbitrary batch-like leading dimensions
-   - Test: pytest -k test_scaled_dot_product_attention
-
-8. Causal Multi-Head Self-Attention (5 pts)
-   - Project x -> Q, K, V (three separate Linear layers)
-   - Split into heads, apply RoPE to Q and K
-   - Apply scaled dot-product attention with causal mask
-   - Concat heads, project output
-   - Test: pytest -k test_multihead_self_attention
-
-9. Transformer Block (3 pts)
-   - Pre-norm residual connections:
-     z = x + MHSA(RMSNorm(x))
-     output = z + FFN(RMSNorm(z))
-   - Test: pytest -k test_transformer_block
-
-10. Full Transformer LM (3 pts)
-    - Token Embedding -> N x TransformerBlock -> RMSNorm -> Linear head -> logits
-    - Test: pytest -k test_transformer_lm
-"""
 #imports
+from torch.autograd import grad_mode
 import torch
 import torch.nn as nn
+from einops import repeat, unpack, rearrange, einsum
 
 class Linear(nn.Module):
     def __init__(self , d_in: int , d_out: int):
@@ -233,7 +172,7 @@ class Multi_Head_Attention(nn.Module):
         self.v_proj = Linear(d_model, d_model)
         self.output_proj = Linear(d_model, d_model)
         self.attention = Attention()
-        self.num_heads = num_heads
+        self.num_heads = num_heads                              
         self.d_k = d_model//num_heads
         if max_seq_len is not None:
             self.rope = RoPE(d_model//num_heads, max_seq_len, theta)
@@ -325,4 +264,229 @@ class TransformerLM(nn.Module):
     
     
 
+class GQA(nn.Module):
+    '''
+    there will be two versions —— with and without RoPE
+    '''
+    def __init__(self, d_model: int , num_heads: int, num_kv_heads: int , max_seq_len: int|None = None , theta: float | None = None):
+        super().__init__()
+        self.num_kv_heads = num_kv_heads
+        self.num_queries_per_kv_group = num_heads//num_kv_heads
+        kv_dim = d_model//self.num_queries_per_kv_group
+        self.q_proj = Linear(d_model , d_model)
+        self.k_proj = Linear(d_model, kv_dim)
+        self.v_proj = Linear(d_model, kv_dim)
+
+        self.output_proj = Linear(d_model, d_model)
+        self.attention = Attention()
+        self.num_heads = num_heads
+        self.d_k = d_model//num_heads
+        if max_seq_len is not None:
+            self.rope = RoPE(d_model//num_heads, max_seq_len, theta)
+
+    
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+        # (batch_size, seq_len, d_model))
+        Q = self.q_proj(x)
+        K = self.k_proj(x)
+        V = self.v_proj(x)
+
+        # reshape and transpose
+        Q = Q.view(*Q.shape[:-1], self.num_heads , self.d_k).transpose(-3,-2)
+        K = K.view(*K.shape[:-1], self.num_kv_heads , self.d_k).transpose(-3,-2)
+        V = V.view(*V.shape[:-1], self.num_kv_heads , self.d_k).transpose(-3,-2)
+
         
+
+        if hasattr(self , 'rope'):
+            Q = self.rope(Q , token_positions )
+            K = self.rope(K , token_positions )
+
+        if self.num_queries_per_kv_group > 1:
+            K = repeat(K, 'b g s d -> b (g r) s d', r=self.num_queries_per_kv_group)
+            V = repeat(V, 'b g s d -> b (g r) s d', r=self.num_queries_per_kv_group)
+
+
+        # causal masking time
+        # torch.tril creates a lower triangular matrix of 1s (past positions) and 0s (future positions)
+        seq_len = x.shape[-2]
+        mask  = torch.tril(torch.ones(seq_len , seq_len , device=x.device , dtype=bool))
+        out =  self.attention(Q , K , V , mask) #(... , num_heads , seq_len , d_k)
+        out = out.transpose(-3,-2)
+        out = out.reshape(*out.shape[:-2] , -1)
+        return self.output_proj(out) 
+
+
+class NaiveMLA(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, latent_dim_q: int,latent_dim_kv: int, d_v: int,d_kC: int, d_kR: int,  max_seq_len: int, theta: float):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.latent_dim_q = latent_dim_q
+        self.latent_dim_kv = latent_dim_kv
+        self.d_v = d_v
+        self.d_kC = d_kC
+        self.d_kR = d_kR
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+        self.d_k = d_model//num_heads
+        self.attention = Attention()
+
+        self.W_DQ = Linear(d_model, latent_dim_q) #compresses query
+        self.W_UQ = Linear(latent_dim_q, num_heads*(d_kC + d_kR)) #up project query
+
+        self.W_DKV = Linear(d_model, latent_dim_kv) #compress kv
+        self.W_UK = Linear(latent_dim_kv, num_heads*self.d_kC) #key up-proj
+        self.W_KR = Linear(d_model, d_kR) #decoupled rope key
+        self.W_UV = Linear(latent_dim_kv, num_heads*d_v) #value up proj
+
+        self.out_proj = Linear(num_heads*d_v, d_model) #final o/p    
+  
+        self.rope = RoPE(d_kR, max_seq_len, theta) #rope for decoupled parts only
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+        L_kv = self.W_DKV(x) #(batch_size, seq_len, latent_dim_kv)
+        L_q = self.W_DQ(x) #(batch_size, seq_len, latent_dim_q)
+        Q = self.W_UQ(L_q) #(b, t, num_heads*(d_kC + d_kR))
+
+        [Q_C_packed, Q_R_packed] = unpack(Q, [self.num_heads * self.d_kC, self.num_heads * self.d_kR], "b t *")
+        Q_C = rearrange(Q_C_packed, "b t (h d_c) -> b h t d_c", h = self.num_heads)
+        Q_R = rearrange(Q_R_packed, "b t (h d_r) -> b h t d_r", h = self.num_heads)
+
+        # [b, t, latent_dim_kv] -> [b, t, h* d_kc] -> [b, h, t, d_kc]
+        K_C = rearrange(self.W_UK(L_kv), 'b t (h d) -> b h t d', h=self.num_heads)
+        # (b, t, d_kR) -> (b 1 t d_kR)
+        K_R = rearrange(self.W_KR(x), "b t d -> b 1 t d")
+
+
+        V = rearrange(self.W_UV(L_kv), "b t (h d_v) -> b h t d_v", h = self.num_heads)
+
+        # pass through rope 
+        Q_R = self.rope(Q_R, token_positions)
+        K_R = self.rope(K_R, token_positions)
+
+        # torch.tril creates a lower triangular matrix of 1s (past positions) and 0s (future positions)
+        seq_len = x.shape[-2]
+        mask  = torch.tril(torch.ones(seq_len , seq_len , device=x.device , dtype=bool))
+
+        Q = torch.cat([Q_C, Q_R], dim = -1)
+        #(b 1 t d_kR -> b h t d_kR)
+        K_R_expand = repeat(K_R, "b 1 t d -> b h t d", h=self.num_heads)
+        K = torch.cat([K_C, K_R_expand], dim = -1)
+
+        out =  self.attention(Q , K , V , mask) #(b, h, t, d_v)
+        out_flattened = rearrange(out, 'b h t d -> b t (h d)')
+        final_output = self.out_proj(out_flattened)
+        return final_output
+    
+class MLA(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, latent_dim_q: int,latent_dim_kv: int, d_v: int,d_kC: int, d_kR: int,  max_seq_len: int, theta: float):
+        super().__init__()
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.latent_dim_q = latent_dim_q
+        self.latent_dim_kv = latent_dim_kv
+        self.d_v = d_v
+        self.d_kC = d_kC
+        self.d_kR = d_kR
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+        self.d_k = d_model//num_heads
+
+        self.W_DQ = Linear(d_model, latent_dim_q) #compresses query
+        self.W_UQ = Linear(latent_dim_q, num_heads*(d_kC + d_kR)) #up project query
+
+        self.W_DKV = Linear(d_model, latent_dim_kv) #compress kv
+
+        self.W_KR = Linear(d_model, d_kR) #decoupled rope key
+
+        self.W_UK = nn.Parameter(torch.empty(num_heads,d_kC, latent_dim_kv)) #key up-proj
+        self.W_UV = nn.Parameter(torch.empty(num_heads, d_v, latent_dim_kv)) #value up proj
+
+        self.out_proj = Linear(num_heads*d_v, d_model) #final o/p    
+  
+        self.rope = RoPE(d_kR, max_seq_len, theta) #rope for decoupled parts only
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+
+        L_kv = self.W_DKV(x) #(batch_size, seq_len, latent_dim_kv)
+        L_q = self.W_DQ(x) #(batch_size, seq_len, latent_dim_q)
+        Q = self.W_UQ(L_q) #(b, t, num_heads*(d_kC + d_kR))
+        '''
+        einops.unpack requires the second argument to be a list of shapes (one shape per output tensor). 
+        a shape must always be an iterable (like a list or tuple), even if it only contains a single dimension.
+
+        [[size1], [size2]]: Passes two separate 1D shapes. 
+        unpack cleanly outputs two distinct tensors with the exact dimensions required.
+        '''
+        [Q_C_packed, Q_R_packed] = unpack(Q, [[self.num_heads * self.d_kC], [self.num_heads * self.d_kR]], "b t *")
+        Q_C = rearrange(Q_C_packed, "b t (h d_c) -> b h t d_c", h = self.num_heads)
+        Q_R = rearrange(Q_R_packed, "b t (h d_r) -> b h t d_r", h = self.num_heads)
+
+        Q_C_absorbed = einsum(Q_C, self.W_UK, 'b h t d, h d l -> b h t l')
+
+        # (b, t, d_kR) -> (b 1 t d_kR)
+        K_R = rearrange(self.W_KR(x), "b t d -> b 1 t d")
+
+        scores_C = einsum(Q_C_absorbed, L_kv, 'b h t l, b s l -> b h t s')
+
+        # pass through rope 
+        Q_R = self.rope(Q_R, token_positions)
+        K_R = self.rope(K_R, token_positions)
+        K_R_expanded = repeat(K_R, "b 1 s d -> b h s d", h=self.num_heads)
+        scores_R = einsum(Q_R, K_R_expanded, 'b h t d,b h s d -> b h t s ')
+
+        total_score = scores_C + scores_R
+        scale_factor = (self.d_kC + self.d_kR) ** -0.5
+        scaled_scores = total_score * scale_factor
+
+        seq_len = x.shape[-2]
+        mask  = torch.tril(torch.ones(seq_len , seq_len , device=x.device , dtype=bool))
+        # b h t s ( t = s during training) ; mask = False [ , , s , s]
+        scaled_scores = scaled_scores.masked_fill(mask == False, float('-inf')) # PyTorch evaluates and broadcasts tensor dimensions from right to left.
+        attn_weights = softmax(scaled_scores, dim=-1)  # ( b, h, t, s)
+
+        output_latent = einsum(attn_weights, L_kv, 'b h t s, b s l -> b h t l')
+        out = einsum(output_latent, self.W_UV, 'b h t l,h d l-> b h t d')
+        out = rearrange(out, 'b h t d -> b t (h d)')
+        return self.out_proj(out)
+
+
+
+
+
+
+
+        
+
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        
+
+
+
+
+
+
+
+
+
+
+
+
+        
+
+

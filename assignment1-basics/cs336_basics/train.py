@@ -58,6 +58,8 @@ from cs336_basics.optimizer import AdamW
 from cs336_basics.training import get_batch, load_checkpoint, save_checkpoint
 from cs336_basics.nn_utils import cross_entropy, lr_cosine_schedule, gradient_clipping
 import time
+from cs336_basics.tokenizer import Tokenizer
+import torch.nn.functional as F
 
 
 def get_args():
@@ -262,9 +264,102 @@ def main():
             save_checkpoint(model, optimizer, step, checkpoint_path)
             print(f"Saved checkpoint to {checkpoint_path} (^ ^)")
 
+    generate(model, "Once upon a time", context_length=args.context_length)
+
+
+def generate(
+    model,  # accepting the instantiated model object directly :P
+    prompt: str, 
+    checkpoint_path: str= None, 
+    tokenizer_path: str = "data/tokenizer.pt", 
+    max_tokens: int = 100, 
+    temperature: float = 0.8, 
+    top_p: float = 0.9, 
+    context_length: int = 128
+):
+  if torch.backends.mps.is_available():
+        device = torch.device("mps")
+  elif torch.cuda.is_available():
+        device = torch.device("cuda")
+  else:
+        device = torch.device("cpu")
+
+  tokenized_data = torch.load(tokenizer_path, map_location="cpu")
+  tokenizer = Tokenizer(
+        vocab=tokenized_data["vocab"],
+        merges=tokenized_data["merges"],
+        special_tokens=["<|endoftext|>"]
+    )
+  eos_id = tokenizer.encoder.get(b"<|endoftext|>", None)
+
+  if checkpoint_path is not None:
+      print(f"Loading weights from disk checkpoint: {checkpoint_path}")
+      checkpoint = torch.load(checkpoint_path, map_location=device)
+      if "model_state_dict" in checkpoint:
+          model.load_state_dict(checkpoint["model_state_dict"])
+      else:
+          model.load_state_dict(checkpoint["model"])
+  else:
+      print("Using active model weights already existing in-memory.")
+
+  model.to(device)
+  model.eval()
+
+  prompt_tokens = tokenizer.encode(prompt)
+  x = torch.tensor(prompt_tokens, dtype=torch.long, device=device).unsqueeze(0)
+
+  print(f"Generating text for prompt: {prompt} (^^')")
+
+  #core generation loop
+  with torch.no_grad():
+        #limiting the growing sequence
+        for _ in range(max_tokens):
+            if x.size(1) > context_length:
+                # FIX 1: Added colon to keep 2D slicing active
+                x_input = x[:, -context_length:] 
+            else:
+                x_input = x
+
+            logits = model(x_input)
+            # slices out the last position's logits -> shape [vocab_size]
+            logits = logits[0, -1 , :]
+
+            #temperature scaling
+            if temperature > 0:
+                logits  = logits / temperature
+              
+            #top_p scaling
+            if top_p < 1.0:
+                sorted_logits , sorted_indices = torch.sort(logits, descending=True)
+                #convert logit to sorted probabilities
+                sorted_probs = F.softmax(sorted_logits, dim=-1)
+
+                #apply the shifting trick
+                cumulative_probs_shifted = torch.cumsum(sorted_probs, dim=-1) - sorted_probs
+                sorted_indices_to_remove = cumulative_probs_shifted > top_p
+                
+                # map the mask back to the original unsorted logits indices
+                indices_to_remove = sorted_indices_to_remove.scatter(0, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = float('-inf')
+
+            probs = F.softmax(logits, dim=-1)
+            next_token_id = torch.multinomial(probs, num_samples=1)
+            x = torch.cat((x, next_token_id.unsqueeze(0)), dim=1)
+            
+            if eos_id is not None and next_token_id.item() == eos_id:
+                break
+
+  generated_ids = x.squeeze(0).tolist()
+  generated_text = tokenizer.decode(generated_ids)
+  print(generated_text)
+  return generated_text
+
+
+
 
 if __name__ == "__main__":
     main()
+    
 
 
 
